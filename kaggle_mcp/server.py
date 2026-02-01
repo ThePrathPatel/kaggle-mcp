@@ -27,7 +27,7 @@ class ServerState:
     trainer: Optional[MLTrainer] = None
     current_competition: Optional[str] = None
     current_experiment_id: Optional[str] = None
-    data_dir: Path = Path("./kaggle_data")
+    data_dir: Path = Path(__file__).parent.parent / "kaggle_data"
 
 
 state = ServerState()
@@ -268,6 +268,39 @@ def get_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="create_kaggle_notebook",
+            description="Create a Kaggle notebook directly in your Kaggle account. The notebook will be linked to the current competition.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title for the notebook (e.g., 'Titanic Random Forest Baseline')",
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Python code for the notebook. Will be converted to notebook cells.",
+                    },
+                    "is_private": {
+                        "type": "boolean",
+                        "description": "Whether the notebook should be private (default: False)",
+                        "default": False,
+                    },
+                    "enable_gpu": {
+                        "type": "boolean",
+                        "description": "Enable GPU acceleration (default: False)",
+                        "default": False,
+                    },
+                    "enable_internet": {
+                        "type": "boolean",
+                        "description": "Enable internet access in the notebook (default: True)",
+                        "default": True,
+                    },
+                },
+                "required": ["title", "code"],
+            },
+        ),
     ]
 
 
@@ -306,6 +339,7 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict:
         "get_experiment_summary": handle_get_experiment_summary,
         "get_status": handle_get_status,
         "configure_guardrails": handle_configure_guardrails,
+        "create_kaggle_notebook": handle_create_kaggle_notebook,
     }
 
     handler = handlers.get(name)
@@ -366,24 +400,68 @@ async def handle_list_competitions(args: dict) -> dict:
     }
 
 
+def get_competition_dir(competition: str) -> Path:
+    """Get the base directory for a competition."""
+    return state.data_dir / competition
+
+
+def get_competition_data_dir(competition: str) -> Path:
+    """Get the data directory for a competition."""
+    return get_competition_dir(competition) / "data"
+
+
+def get_competition_models_dir(competition: str) -> Path:
+    """Get the models directory for a competition."""
+    return get_competition_dir(competition) / "models"
+
+
+def get_competition_scripts_dir(competition: str) -> Path:
+    """Get the scripts directory for a competition."""
+    return get_competition_dir(competition) / "scripts"
+
+
+def get_competition_submissions_dir(competition: str) -> Path:
+    """Get the submissions directory for a competition."""
+    return get_competition_dir(competition) / "submissions"
+
+
 async def handle_setup_competition(args: dict) -> dict:
     """Set up a competition."""
     competition = args["competition"]
 
-    # Download competition data
+    # Create competition directory structure
+    comp_dir = get_competition_dir(competition)
+    data_dir = get_competition_data_dir(competition)
+    models_dir = get_competition_models_dir(competition)
+    scripts_dir = get_competition_scripts_dir(competition)
+    submissions_dir = get_competition_submissions_dir(competition)
+
+    for d in [data_dir, models_dir, scripts_dir, submissions_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Download competition data to the data subdirectory
     data_path = await state.kaggle_client.download_competition_data(
         competition,
-        path=state.data_dir / competition,
+        path=data_dir,
     )
 
     # List files
     files = await state.kaggle_client.list_competition_files(competition)
 
-    # Create experiment
+    # Create experiment (store DB in competition folder)
+    exp_db_path = comp_dir / "experiments.db"
+    state.experiment_manager = ExperimentManager(exp_db_path)
+
     experiment = await state.experiment_manager.create_experiment(
         competition=competition,
         description=args.get("description", f"Experiment for {competition}"),
         data_version="v1",
+    )
+
+    # Update trainer to save models in competition's models folder
+    state.trainer = MLTrainer(
+        TrainingConfig(artifact_dir=models_dir),
+        timeout_callback=lambda: state.cost_controller.check_job_timeout("current")[0],
     )
 
     state.current_competition = competition
@@ -394,6 +472,9 @@ async def handle_setup_competition(args: dict) -> dict:
         "competition": competition,
         "experiment_id": experiment.experiment_id,
         "data_path": str(data_path),
+        "models_path": str(models_dir),
+        "scripts_path": str(scripts_dir),
+        "submissions_path": str(submissions_dir),
         "files": files,
     }
 
@@ -406,11 +487,12 @@ async def handle_analyze_data(args: dict) -> dict:
     import pandas as pd
 
     file_name = args.get("file_name", "train.csv")
-    file_path = state.data_dir / state.current_competition / file_name
+    data_dir = get_competition_data_dir(state.current_competition)
+    file_path = data_dir / file_name
 
     if not file_path.exists():
-        # Try looking in zip extracted folder
-        for p in (state.data_dir / state.current_competition).rglob(file_name):
+        # Try looking in zip extracted folder or parent
+        for p in get_competition_dir(state.current_competition).rglob(file_name):
             file_path = p
             break
 
@@ -441,9 +523,10 @@ async def handle_train_model(args: dict) -> dict:
     import pandas as pd
 
     # Load training data
-    train_path = state.data_dir / state.current_competition / "train.csv"
+    data_dir = get_competition_data_dir(state.current_competition)
+    train_path = data_dir / "train.csv"
     if not train_path.exists():
-        for p in (state.data_dir / state.current_competition).rglob("train.csv"):
+        for p in get_competition_dir(state.current_competition).rglob("train.csv"):
             train_path = p
             break
 
@@ -525,9 +608,10 @@ async def handle_tune_hyperparameters(args: dict) -> dict:
 
     import pandas as pd
 
-    train_path = state.data_dir / state.current_competition / "train.csv"
+    data_dir = get_competition_data_dir(state.current_competition)
+    train_path = data_dir / "train.csv"
     if not train_path.exists():
-        for p in (state.data_dir / state.current_competition).rglob("train.csv"):
+        for p in get_competition_dir(state.current_competition).rglob("train.csv"):
             train_path = p
             break
 
@@ -567,9 +651,10 @@ async def handle_generate_predictions(args: dict) -> dict:
     prediction_column = args["prediction_column"]
 
     # Find test file
-    test_path = state.data_dir / state.current_competition / test_file
+    data_dir = get_competition_data_dir(state.current_competition)
+    test_path = data_dir / test_file
     if not test_path.exists():
-        for p in (state.data_dir / state.current_competition).rglob(test_file):
+        for p in get_competition_dir(state.current_competition).rglob(test_file):
             test_path = p
             break
 
@@ -577,10 +662,11 @@ async def handle_generate_predictions(args: dict) -> dict:
         return {"error": f"Test file not found: {test_file}"}
 
     # Find model artifact
+    models_dir = get_competition_models_dir(state.current_competition)
     run = await state.experiment_manager.get_run(run_id)
     if not run or not run.artifact_path:
-        # Try to find by run_id prefix
-        for p in (state.data_dir / "models").glob(f"{run_id}*.pkl"):
+        # Try to find by run_id prefix in competition's models folder
+        for p in models_dir.glob(f"{run_id}*.pkl"):
             artifact_path = str(p)
             break
         else:
@@ -598,12 +684,13 @@ async def handle_generate_predictions(args: dict) -> dict:
     )
 
     # Create submission file
+    submissions_dir = get_competition_submissions_dir(state.current_competition)
     submission_df = pd.DataFrame({
         id_column: ids,
         prediction_column: predictions,
     })
 
-    submission_path = state.data_dir / state.current_competition / f"submission_{run_id}.csv"
+    submission_path = submissions_dir / f"submission_{run_id}.csv"
     submission_df.to_csv(submission_path, index=False)
 
     return {
@@ -799,6 +886,139 @@ async def handle_configure_guardrails(args: dict) -> dict:
             "max_total_training_time_per_day": state.cost_controller.config.max_total_training_time_per_day,
         },
     }
+
+
+async def handle_create_kaggle_notebook(args: dict) -> dict:
+    """Create a Kaggle notebook directly in the user's account."""
+    if not state.current_competition:
+        return {"error": "No competition set up. Call setup_competition first."}
+
+    title = args["title"]
+    code = args["code"]
+    is_private = args.get("is_private", False)
+    enable_gpu = args.get("enable_gpu", False)
+    enable_internet = args.get("enable_internet", True)
+
+    # Get username from environment
+    username = os.environ.get("KAGGLE_USERNAME")
+    if not username:
+        return {"error": "KAGGLE_USERNAME environment variable not set. Add it to your claude_desktop_config.json"}
+
+    # Convert code to notebook format
+    # Split code into cells by looking for markdown comments or double newlines
+    cells = []
+
+    # Add title cell
+    cells.append({
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [f"# {title}\n", f"\n", f"Competition: {state.current_competition}\n"]
+    })
+
+    # Split code into logical cells
+    code_blocks = []
+    current_block = []
+    lines = code.split('\n')
+
+    for line in lines:
+        # Start new cell on imports, function definitions, or class definitions
+        if current_block and (
+            line.startswith('import ') or
+            line.startswith('from ') or
+            line.startswith('def ') or
+            line.startswith('class ') or
+            line.startswith('# %%') or
+            line.startswith('# CELL:')
+        ):
+            if current_block:
+                code_blocks.append('\n'.join(current_block))
+                current_block = []
+        current_block.append(line)
+
+    if current_block:
+        code_blocks.append('\n'.join(current_block))
+
+    # If no natural splits, just use the whole code as one cell
+    if not code_blocks:
+        code_blocks = [code]
+
+    # Convert code blocks to cells
+    for block in code_blocks:
+        if block.strip():
+            # Convert block to source array format
+            source_lines = [line + '\n' for line in block.split('\n')]
+            if source_lines:
+                source_lines[-1] = source_lines[-1].rstrip('\n')  # Last line no newline
+            cells.append({
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": source_lines
+            })
+
+    notebook_json = json.dumps({
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 4
+    })
+
+    # Create slug from title
+    slug = title.lower().replace(' ', '-').replace('_', '-')
+    # Remove special characters
+    slug = ''.join(c for c in slug if c.isalnum() or c == '-')
+
+    try:
+        from kagglesdk import KaggleClient as SdkClient
+        from kagglesdk.kernels.types.kernels_api_service import ApiSaveKernelRequest
+
+        api_token = os.environ.get("KAGGLE_API_TOKEN")
+        competition = state.current_competition
+
+        def _create_notebook():
+            with SdkClient(api_token=api_token) as client:
+                request = ApiSaveKernelRequest()
+                request.slug = f"{username}/{slug}"
+                request.new_title = title
+                request.text = notebook_json
+                request.language = "python"
+                request.kernel_type = "notebook"
+                request.is_private = is_private
+                request.enable_gpu = enable_gpu
+                request.enable_tpu = False
+                request.enable_internet = enable_internet
+                request.competition_data_sources = [competition]
+
+                return client.kernels.kernels_api_client.save_kernel(request)
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _create_notebook)
+
+        # Also save locally
+        scripts_dir = get_competition_scripts_dir(state.current_competition)
+        local_path = scripts_dir / f"{slug}.ipynb"
+        with open(local_path, 'w') as f:
+            f.write(notebook_json)
+
+        return {
+            "status": "success",
+            "title": title,
+            "slug": f"{username}/{slug}",
+            "url": response.url if hasattr(response, 'url') and response.url else f"https://www.kaggle.com/code/{username}/{slug}",
+            "version": response.version_number if hasattr(response, 'version_number') else 1,
+            "local_path": str(local_path),
+            "error": response.error if hasattr(response, 'error') and response.error else None,
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to create notebook: {str(e)}"}
 
 
 async def run_server():

@@ -169,9 +169,12 @@ class FeatureEngineer:
         return self._feature_info
 
 
-def detect_target_type(y: pd.Series) -> str:
+def detect_target_type(y) -> str:
     """Detect if target is classification or regression."""
-    unique_values = y.nunique()
+    if isinstance(y, np.ndarray):
+        unique_values = len(np.unique(y))
+    else:
+        unique_values = y.nunique()
 
     # If very few unique values, likely classification
     if unique_values <= 20:
@@ -185,9 +188,12 @@ def detect_target_type(y: pd.Series) -> str:
     return "regression"
 
 
-def detect_task_type(y: pd.Series) -> str:
+def detect_task_type(y) -> str:
     """Detect the ML task type."""
-    unique_values = y.nunique()
+    if isinstance(y, np.ndarray):
+        unique_values = len(np.unique(y))
+    else:
+        unique_values = y.nunique()
 
     if unique_values == 2:
         return "binary_classification"
