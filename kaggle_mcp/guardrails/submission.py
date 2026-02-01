@@ -12,7 +12,7 @@ import json
 class SubmissionConfig:
     """Configuration for submission guardrails."""
     max_submissions_per_day: int = 5
-    require_approval: bool = True
+    require_approval: bool = False
     dry_run_mode: bool = False
     min_cv_score_threshold: Optional[float] = None
     min_improvement_threshold: float = 0.001
