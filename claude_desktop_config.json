@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "kaggle": {
+      "command": "/Users/pratham/kaggle-mcp/.venv/bin/python",
+      "args": ["-m", "kaggle_mcp.server"],
+      "cwd": "/Users/pratham/kaggle-mcp"
+    }
+  }
+}
