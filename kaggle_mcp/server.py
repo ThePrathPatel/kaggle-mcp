@@ -503,6 +503,11 @@ async def handle_create_kaggle_notebook(args: dict) -> dict:
     slug = title.lower().replace(' ', '-').replace('_', '-')
     # Remove special characters
     slug = ''.join(c for c in slug if c.isalnum() or c == '-')
+    # Collapse multiple dashes into single dash (Kaggle normalizes these)
+    while '--' in slug:
+        slug = slug.replace('--', '-')
+    # Remove leading/trailing dashes
+    slug = slug.strip('-')
 
     try:
         from kagglesdk import KaggleClient as SdkClient
@@ -566,18 +571,33 @@ async def handle_create_kaggle_notebook(args: dict) -> dict:
             })
             result["run_result"] = run_result
 
-            # Auto-submit if requested and run succeeded
-            if auto_submit and run_result.get("status") == "complete":
-                submit_result = await handle_submit_notebook_output({
-                    "notebook_slug": notebook_slug,
-                    "output_file": "submission.csv",
-                    "message": submission_message,
-                })
-                result["submit_result"] = submit_result
-            elif auto_submit and run_result.get("status") != "complete":
-                result["submit_result"] = {
-                    "error": f"Cannot auto-submit: notebook execution failed with status '{run_result.get('status')}'"
-                }
+            # Auto-submit if requested
+            if auto_submit:
+                run_status = run_result.get("status", "")
+                run_error = run_result.get("error", "")
+
+                # Try to submit if run succeeded OR if status check failed (notebook may have succeeded)
+                should_try_submit = (
+                    run_status == "complete" or
+                    "403" in str(run_error) or  # Status check permission denied
+                    "timeout" in run_status.lower()  # Timeout but notebook might have finished
+                )
+
+                if should_try_submit:
+                    submit_result = await handle_submit_notebook_output({
+                        "notebook_slug": notebook_slug,
+                        "output_file": "submission.csv",
+                        "message": submission_message,
+                    })
+                    result["submit_result"] = submit_result
+                elif run_status == "error":
+                    result["submit_result"] = {
+                        "error": f"Cannot auto-submit: notebook execution failed with status '{run_status}'"
+                    }
+                else:
+                    result["submit_result"] = {
+                        "error": f"Cannot auto-submit: unexpected run status '{run_status}'"
+                    }
 
         return result
 
@@ -675,6 +695,8 @@ async def handle_run_kaggle_notebook(args: dict) -> dict:
 
 async def handle_submit_notebook_output(args: dict) -> dict:
     """Submit a notebook's output file to the competition."""
+    import requests
+
     if not state.current_competition:
         return {"error": "No competition set up. Call setup_competition first."}
 
@@ -683,31 +705,59 @@ async def handle_submit_notebook_output(args: dict) -> dict:
     message = args["message"]
 
     try:
-        # Download the output file from the notebook
-        def _download_output():
-            with _get_kaggle_sdk_client() as client:
-                return client.kernels.kernels_api_client.download_kernel_output(
-                    notebook_slug,
-                    output_file
-                )
+        # Get API token from kaggle.json
+        kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+        with open(kaggle_json) as f:
+            creds = json.load(f)
+        api_token = creds.get("api_token")
+        if not api_token:
+            return {"error": "No api_token found in kaggle.json. Please generate a new API token from Kaggle settings."}
+
+        # Parse username and kernel slug
+        if "/" in notebook_slug:
+            user_name, kernel_slug = notebook_slug.split("/", 1)
+        else:
+            return {"error": f"Invalid notebook_slug format: '{notebook_slug}'. Expected 'username/kernel-name'"}
+
+        # Use Bearer token auth to get output file URLs
+        headers = {"Authorization": f"Bearer {api_token}"}
+        output_url = f"https://www.kaggle.com/api/v1/kernels/output?userName={user_name}&kernelSlug={kernel_slug}"
 
         loop = asyncio.get_event_loop()
-        output_content = await loop.run_in_executor(None, _download_output)
+
+        def _get_output_info():
+            response = requests.get(output_url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+        output_info = await loop.run_in_executor(None, _get_output_info)
+
+        # Find the requested file in the output
+        files = output_info.get("files", [])
+        file_url = None
+        for f in files:
+            if f.get("fileName") == output_file or f.get("fileNameNullable") == output_file:
+                file_url = f.get("url") or f.get("urlNullable")
+                break
+
+        if not file_url:
+            available_files = [f.get("fileName", f.get("fileNameNullable", "unknown")) for f in files]
+            return {"error": f"Output file '{output_file}' not found. Available files: {available_files}"}
+
+        # Download the file
+        def _download_file():
+            response = requests.get(file_url)
+            response.raise_for_status()
+            return response.content
+
+        content = await loop.run_in_executor(None, _download_file)
 
         # Save to local submissions directory
         submissions_dir = get_competition_submissions_dir(state.current_competition)
         local_file = submissions_dir / f"notebook_{output_file}"
 
-        # Handle different response types
-        if hasattr(output_content, 'content'):
-            content = output_content.content
-        elif isinstance(output_content, bytes):
-            content = output_content
-        else:
-            content = str(output_content).encode()
-
         with open(local_file, 'wb') as f:
-            f.write(content if isinstance(content, bytes) else content.encode())
+            f.write(content)
 
         # Submit directly using the Kaggle client
         full_message = f"[Notebook: {notebook_slug}] {message}"
