@@ -63,8 +63,22 @@ def get_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="check_competition_access",
+            description="Check if you have access to a competition (i.e., have accepted the rules). Call this before setup_competition if download fails.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "competition": {
+                        "type": "string",
+                        "description": "Competition reference (e.g., 'titanic')",
+                    },
+                },
+                "required": ["competition"],
+            },
+        ),
+        Tool(
             name="setup_competition",
-            description="Set up a competition workspace. Downloads data and initializes experiment tracking.",
+            description="Set up a competition workspace. Downloads data and initializes experiment tracking. Note: You must have accepted the competition rules on Kaggle first.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -328,6 +342,7 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict:
 
     handlers = {
         "list_competitions": handle_list_competitions,
+        "check_competition_access": handle_check_competition_access,
         "setup_competition": handle_setup_competition,
         "analyze_data": handle_analyze_data,
         "train_model": handle_train_model,
@@ -397,6 +412,26 @@ async def handle_list_competitions(args: dict) -> dict:
             for c in competitions
         ],
         "count": len(competitions),
+    }
+
+
+async def handle_check_competition_access(args: dict) -> dict:
+    """Check if user has access to a competition."""
+    competition = args["competition"]
+    result = await state.kaggle_client.check_competition_access(competition)
+
+    if not result.get("has_access"):
+        return {
+            "has_access": False,
+            "message": "You must accept the competition rules before downloading data.",
+            "action_required": f"Please visit the link below and click 'I Understand and Accept' or 'Join Competition'",
+            "join_url": result.get("join_url", f"https://www.kaggle.com/competitions/{competition}/rules"),
+        }
+
+    return {
+        "has_access": True,
+        "message": "You have access to this competition's data.",
+        "file_count": result.get("file_count", 0),
     }
 
 

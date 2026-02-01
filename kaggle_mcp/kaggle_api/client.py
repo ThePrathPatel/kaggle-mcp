@@ -16,14 +16,7 @@ from .models import Competition, Dataset, Submission, LeaderboardEntry
 @dataclass
 class KaggleConfig:
     """Configuration for Kaggle API client."""
-    username: Optional[str] = None
-    key: Optional[str] = None
-    config_dir: Optional[Path] = None
     data_dir: Path = Path("./kaggle_data")
-
-    def __post_init__(self):
-        if self.config_dir is None:
-            self.config_dir = Path.home() / ".kaggle"
 
 
 class KaggleClient:
@@ -48,59 +41,41 @@ class KaggleClient:
             raise KaggleAuthError(f"Failed to authenticate with Kaggle: {e}")
 
     def _setup_credentials(self):
-        """Set up credentials (synchronous)."""
-        # Set config directory
-        if self.config.config_dir:
-            os.environ["KAGGLE_CONFIG_DIR"] = str(self.config.config_dir)
+        """Set up credentials from ~/.kaggle/kaggle.json only."""
+        kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
 
-        # Priority 1: Explicit config
-        api_token = None
-        username = self.config.username
-        key = self.config.key
-
-        # Priority 2: Environment variables
-        if not api_token:
-            api_token = os.environ.get("KAGGLE_API_TOKEN")
-        if not username:
-            username = os.environ.get("KAGGLE_USERNAME")
-        if not key:
-            key = os.environ.get("KAGGLE_KEY")
-
-        # Priority 3: kaggle.json file
-        kaggle_json = self.config.config_dir / "kaggle.json"
-        if kaggle_json.exists():
-            with open(kaggle_json) as f:
-                creds = json.load(f)
-                if not username:
-                    username = creds.get("username")
-                if not key and not api_token:
-                    key = creds.get("key")
-
-        # Check if key is actually an access token (KGAT_ prefix)
-        if key and key.startswith("KGAT_"):
-            api_token = key
-            key = None
-
-        if not api_token and (not username or not key):
+        if not kaggle_json.exists():
             raise KaggleAuthError(
-                f"No Kaggle credentials found. Either:\n"
-                f"  1. Create {kaggle_json} with your API key, or\n"
-                f"  2. Set KAGGLE_API_TOKEN environment variable, or\n"
-                f"  3. Set KAGGLE_USERNAME and KAGGLE_KEY environment variables\n"
-                f"Get your API key from: https://www.kaggle.com/settings/account"
+                f"Kaggle credentials not found at {kaggle_json}\n\n"
+                f"To set up credentials:\n"
+                f"  1. Go to https://www.kaggle.com/settings/account\n"
+                f"  2. Click 'Create New API Token' under 'API' section\n"
+                f"  3. Move the downloaded kaggle.json to ~/.kaggle/kaggle.json\n"
+                f"  4. Run: chmod 600 ~/.kaggle/kaggle.json"
             )
 
-        self._api_token = api_token
+        with open(kaggle_json) as f:
+            creds = json.load(f)
+
+        username = creds.get("username")
+        key = creds.get("key")
+
+        if not username or not key:
+            raise KaggleAuthError(
+                f"Invalid kaggle.json format. Expected: {{\"username\": \"...\", \"key\": \"...\"}}"
+            )
+
         self._username = username
         self._key = key
 
-        # Initialize the SDK client
+        # Check if key is an API token (KGAT_ prefix) or legacy key
         from kagglesdk import KaggleClient as SdkClient
-        self._sdk_client = SdkClient(
-            api_token=api_token,
-            username=username if not api_token else None,
-            password=key if not api_token else None,
-        )
+        if key.startswith("KGAT_"):
+            self._api_token = key
+            self._sdk_client = SdkClient(api_token=key)
+        else:
+            self._api_token = None
+            self._sdk_client = SdkClient(username=username, password=key)
 
     def _ensure_authenticated(self):
         """Ensure API is authenticated."""
@@ -370,6 +345,36 @@ class KaggleClient:
             return None
         except Exception:
             return None
+
+    async def check_competition_access(self, competition: str) -> dict:
+        """Check if user has access to competition data (i.e., has accepted rules)."""
+        self._ensure_authenticated()
+
+        def _check():
+            from kagglesdk.competitions.types.competition_api_service import ApiListDataFilesRequest
+
+            with self._sdk_client as client:
+                try:
+                    request = ApiListDataFilesRequest()
+                    request.competition_name = competition
+                    response = client.competitions.competition_api_client.list_data_files(request)
+                    # If we can list files, we have access
+                    return {
+                        "has_access": True,
+                        "file_count": len(response.files or []),
+                    }
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "403" in error_msg or "accept" in error_msg or "rule" in error_msg or "join" in error_msg:
+                        return {
+                            "has_access": False,
+                            "reason": "You must accept the competition rules first",
+                            "join_url": f"https://www.kaggle.com/competitions/{competition}/rules",
+                        }
+                    raise
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _check)
 
     async def list_datasets(
         self,
