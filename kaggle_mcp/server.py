@@ -123,6 +123,10 @@ def get_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Name of the target column",
                     },
+                    "id_column": {
+                        "type": "string",
+                        "description": "Name of the ID column to exclude from training (e.g., 'Id', 'id')",
+                    },
                     "hyperparameters": {
                         "type": "object",
                         "description": "Custom hyperparameters (optional)",
@@ -569,6 +573,11 @@ async def handle_train_model(args: dict) -> dict:
 
     model_type = ModelType(args["model_type"])
     target_column = args["target_column"]
+    id_column = args.get("id_column")
+
+    # Drop ID column if specified (it shouldn't be used as a feature)
+    if id_column and id_column in df.columns:
+        df = df.drop(columns=[id_column])
 
     # Create experiment run
     run = await state.experiment_manager.create_run(
@@ -728,9 +737,14 @@ async def handle_generate_predictions(args: dict) -> dict:
     submission_path = submissions_dir / f"submission_{run_id}.csv"
     submission_df.to_csv(submission_path, index=False)
 
+    # Read back the CSV content so it can be used by the client
+    csv_content = submission_df.to_csv(index=False)
+
     return {
         "status": "success",
-        "submission_file": str(submission_path),
+        "run_id": run_id,
+        "filename": f"submission_{run_id}.csv",
+        "content": csv_content,
         "rows": len(submission_df),
         "prediction_stats": {
             "mean": float(np.mean(predictions)),
@@ -934,10 +948,17 @@ async def handle_create_kaggle_notebook(args: dict) -> dict:
     enable_gpu = args.get("enable_gpu", False)
     enable_internet = args.get("enable_internet", True)
 
-    # Get username from environment
+    # Get username from kaggle.json or environment
     username = os.environ.get("KAGGLE_USERNAME")
     if not username:
-        return {"error": "KAGGLE_USERNAME environment variable not set. Add it to your claude_desktop_config.json"}
+        # Try to read from ~/.kaggle/kaggle.json
+        kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+        if kaggle_json.exists():
+            with open(kaggle_json) as f:
+                creds = json.load(f)
+                username = creds.get("username")
+    if not username:
+        return {"error": "Kaggle username not found. Set KAGGLE_USERNAME env var or ensure ~/.kaggle/kaggle.json contains 'username'"}
 
     # Convert code to notebook format
     # Split code into cells by looking for markdown comments or double newlines
@@ -1014,11 +1035,22 @@ async def handle_create_kaggle_notebook(args: dict) -> dict:
         from kagglesdk import KaggleClient as SdkClient
         from kagglesdk.kernels.types.kernels_api_service import ApiSaveKernelRequest
 
-        api_token = os.environ.get("KAGGLE_API_TOKEN")
+        # Get credentials from kaggle.json
+        kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+        with open(kaggle_json) as f:
+            creds = json.load(f)
+        api_key = creds.get("key")
+        kaggle_username = creds.get("username")
+
         competition = state.current_competition
 
         def _create_notebook():
-            with SdkClient(api_token=api_token) as client:
+            # Use api_token if key starts with KGAT_, otherwise use username/password auth
+            if api_key and api_key.startswith("KGAT_"):
+                client_ctx = SdkClient(api_token=api_key)
+            else:
+                client_ctx = SdkClient(username=kaggle_username, password=api_key)
+            with client_ctx as client:
                 request = ApiSaveKernelRequest()
                 request.slug = f"{username}/{slug}"
                 request.new_title = title
