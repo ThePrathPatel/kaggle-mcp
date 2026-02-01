@@ -11,22 +11,15 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from .kaggle_api import KaggleClient, KaggleConfig
-from .experiment import ExperimentManager
-from .ml_runtime import MLTrainer, TrainingConfig, ModelFactory, ModelType, FeatureEngineer
-from .ml_runtime.features import detect_task_type
-from .guardrails import SubmissionGuard, SubmissionConfig, CostController, CostConfig
+from .guardrails import SubmissionGuard, SubmissionConfig
 
 
 # Global state
 class ServerState:
     """Global server state."""
     kaggle_client: Optional[KaggleClient] = None
-    experiment_manager: Optional[ExperimentManager] = None
     submission_guard: Optional[SubmissionGuard] = None
-    cost_controller: Optional[CostController] = None
-    trainer: Optional[MLTrainer] = None
     current_competition: Optional[str] = None
-    current_experiment_id: Optional[str] = None
     data_dir: Path = Path(__file__).parent.parent / "kaggle_data"
 
 
@@ -64,7 +57,7 @@ def get_tools() -> list[Tool]:
         ),
         Tool(
             name="check_competition_access",
-            description="Check if you have access to a competition (i.e., have accepted the rules). Call this before setup_competition if download fails.",
+            description="Check if you have access to a competition (i.e., have accepted the rules). Call this before creating a notebook.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -77,8 +70,8 @@ def get_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="setup_competition",
-            description="Set up a competition workspace. Downloads data and initializes experiment tracking. Note: You must have accepted the competition rules on Kaggle first.",
+            name="select_competition",
+            description="Select a competition to work with. This sets the current competition context for notebook creation and submissions. The notebook will have access to competition data via /kaggle/input/{competition}/.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -86,135 +79,8 @@ def get_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Competition reference (e.g., 'titanic', 'house-prices-advanced-regression-techniques')",
                     },
-                    "description": {
-                        "type": "string",
-                        "description": "Description for this experiment",
-                    },
                 },
                 "required": ["competition"],
-            },
-        ),
-        Tool(
-            name="analyze_data",
-            description="Analyze the competition data and return statistics, column types, missing values, etc.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_name": {
-                        "type": "string",
-                        "description": "Name of the data file to analyze (e.g., 'train.csv')",
-                        "default": "train.csv",
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="train_model",
-            description="Train a machine learning model with cross-validation.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "model_type": {
-                        "type": "string",
-                        "description": "Type of model to train",
-                        "enum": [m.value for m in ModelType],
-                    },
-                    "target_column": {
-                        "type": "string",
-                        "description": "Name of the target column",
-                    },
-                    "id_column": {
-                        "type": "string",
-                        "description": "Name of the ID column to exclude from training (e.g., 'Id', 'id')",
-                    },
-                    "hyperparameters": {
-                        "type": "object",
-                        "description": "Custom hyperparameters (optional)",
-                    },
-                    "feature_columns": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Specific columns to use as features (optional, uses all non-target by default)",
-                    },
-                },
-                "required": ["model_type", "target_column"],
-            },
-        ),
-        Tool(
-            name="tune_hyperparameters",
-            description="Automatically tune hyperparameters using Optuna.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "model_type": {
-                        "type": "string",
-                        "description": "Type of model to tune",
-                        "enum": ["xgboost", "lightgbm", "random_forest", "gradient_boosting"],
-                    },
-                    "target_column": {
-                        "type": "string",
-                        "description": "Name of the target column",
-                    },
-                    "n_trials": {
-                        "type": "integer",
-                        "description": "Number of optimization trials (default: 50)",
-                        "default": 50,
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (optional)",
-                    },
-                },
-                "required": ["model_type", "target_column"],
-            },
-        ),
-        Tool(
-            name="generate_predictions",
-            description="Generate predictions on test data using a trained model.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "Run ID of the trained model",
-                    },
-                    "test_file": {
-                        "type": "string",
-                        "description": "Test data file name (default: test.csv)",
-                        "default": "test.csv",
-                    },
-                    "id_column": {
-                        "type": "string",
-                        "description": "ID column name for submission",
-                    },
-                    "prediction_column": {
-                        "type": "string",
-                        "description": "Name for prediction column in submission",
-                    },
-                },
-                "required": ["run_id", "id_column", "prediction_column"],
-            },
-        ),
-        Tool(
-            name="submit_to_kaggle",
-            description="Submit predictions to Kaggle. Requires approval and respects daily limits.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "submission_file": {
-                        "type": "string",
-                        "description": "Path to submission file",
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Submission message/description",
-                    },
-                    "cv_score": {
-                        "type": "number",
-                        "description": "CV score for this submission",
-                    },
-                },
-                "required": ["submission_file", "message"],
             },
         ),
         Tool(
@@ -246,24 +112,8 @@ def get_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="get_experiment_summary",
-            description="Get a summary of the current experiment including all runs and best scores.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
-            name="get_status",
-            description="Get current status including submission limits, training budget, and experiment state.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        Tool(
             name="configure_guardrails",
-            description="Configure safety guardrails for submissions and training.",
+            description="Configure safety guardrails for submissions.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -271,24 +121,16 @@ def get_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum submissions per day",
                     },
-                    "require_approval": {
-                        "type": "boolean",
-                        "description": "Require manual approval for submissions",
-                    },
                     "dry_run_mode": {
                         "type": "boolean",
                         "description": "Enable dry run mode (no actual submissions)",
-                    },
-                    "max_training_time_seconds": {
-                        "type": "integer",
-                        "description": "Maximum training time per job in seconds",
                     },
                 },
             },
         ),
         Tool(
             name="create_kaggle_notebook",
-            description="Create a Kaggle notebook directly in your Kaggle account. The notebook will be linked to the current competition.",
+            description="Create a Kaggle notebook for training and submission. The notebook runs on Kaggle's servers (with optional GPU) and is automatically linked to the current competition. Data is available at /kaggle/input/{competition}/. Set auto_run=True and auto_submit=True for fully automated workflow.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -315,8 +157,64 @@ def get_tools() -> list[Tool]:
                         "description": "Enable internet access in the notebook (default: True)",
                         "default": True,
                     },
+                    "auto_run": {
+                        "type": "boolean",
+                        "description": "Automatically run the notebook after creation (default: False). If True, waits for execution to complete.",
+                        "default": False,
+                    },
+                    "auto_submit": {
+                        "type": "boolean",
+                        "description": "Automatically submit the notebook output after execution (default: False). Requires auto_run=True. Expects the notebook to produce 'submission.csv'.",
+                        "default": False,
+                    },
+                    "submission_message": {
+                        "type": "string",
+                        "description": "Message for the submission (required if auto_submit=True)",
+                    },
                 },
                 "required": ["title", "code"],
+            },
+        ),
+        Tool(
+            name="run_kaggle_notebook",
+            description="Execute a Kaggle notebook and wait for it to complete. Returns the execution status and output files. Use this after 'create_kaggle_notebook' to run the notebook on Kaggle's servers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "notebook_slug": {
+                        "type": "string",
+                        "description": "The notebook slug (e.g., 'username/notebook-title')",
+                    },
+                    "timeout_minutes": {
+                        "type": "integer",
+                        "description": "Maximum time to wait for completion in minutes (default: 60)",
+                        "default": 60,
+                    },
+                },
+                "required": ["notebook_slug"],
+            },
+        ),
+        Tool(
+            name="submit_notebook_output",
+            description="Submit a notebook's output file to the Kaggle competition. Use this after 'run_kaggle_notebook' completes to submit the predictions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "notebook_slug": {
+                        "type": "string",
+                        "description": "The notebook slug (e.g., 'username/notebook-title')",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Name of the output file to submit (e.g., 'submission.csv')",
+                        "default": "submission.csv",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Submission message/description",
+                    },
+                },
+                "required": ["notebook_slug", "message"],
             },
         ),
     ]
@@ -347,18 +245,13 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict:
     handlers = {
         "list_competitions": handle_list_competitions,
         "check_competition_access": handle_check_competition_access,
-        "setup_competition": handle_setup_competition,
-        "analyze_data": handle_analyze_data,
-        "train_model": handle_train_model,
-        "tune_hyperparameters": handle_tune_hyperparameters,
-        "generate_predictions": handle_generate_predictions,
-        "submit_to_kaggle": handle_submit,
+        "select_competition": handle_select_competition,
         "get_leaderboard": handle_get_leaderboard,
         "get_my_submissions": handle_get_submissions,
-        "get_experiment_summary": handle_get_experiment_summary,
-        "get_status": handle_get_status,
         "configure_guardrails": handle_configure_guardrails,
         "create_kaggle_notebook": handle_create_kaggle_notebook,
+        "run_kaggle_notebook": handle_run_kaggle_notebook,
+        "submit_notebook_output": handle_submit_notebook_output,
     }
 
     handler = handlers.get(name)
@@ -374,23 +267,9 @@ async def ensure_initialized():
         state.kaggle_client = KaggleClient(KaggleConfig(data_dir=state.data_dir))
         await state.kaggle_client.authenticate()
 
-    if state.experiment_manager is None:
-        state.experiment_manager = ExperimentManager(state.data_dir / "experiments.db")
-
     if state.submission_guard is None:
         state.submission_guard = SubmissionGuard(
             SubmissionConfig(state_file=state.data_dir / ".submission_state.json")
-        )
-
-    if state.cost_controller is None:
-        state.cost_controller = CostController(
-            CostConfig(state_file=state.data_dir / ".cost_state.json")
-        )
-
-    if state.trainer is None:
-        state.trainer = MLTrainer(
-            TrainingConfig(artifact_dir=state.data_dir / "models"),
-            timeout_callback=lambda: state.cost_controller.check_job_timeout("current")[0],
         )
 
 
@@ -439,386 +318,29 @@ async def handle_check_competition_access(args: dict) -> dict:
     }
 
 
-def get_competition_dir(competition: str) -> Path:
-    """Get the base directory for a competition."""
-    return state.data_dir / competition
-
-
-def get_competition_data_dir(competition: str) -> Path:
-    """Get the data directory for a competition."""
-    return get_competition_dir(competition) / "data"
-
-
-def get_competition_models_dir(competition: str) -> Path:
-    """Get the models directory for a competition."""
-    return get_competition_dir(competition) / "models"
-
-
 def get_competition_scripts_dir(competition: str) -> Path:
     """Get the scripts directory for a competition."""
-    return get_competition_dir(competition) / "scripts"
+    scripts_dir = state.data_dir / competition / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    return scripts_dir
 
 
-def get_competition_submissions_dir(competition: str) -> Path:
-    """Get the submissions directory for a competition."""
-    return get_competition_dir(competition) / "submissions"
-
-
-async def handle_setup_competition(args: dict) -> dict:
-    """Set up a competition."""
+async def handle_select_competition(args: dict) -> dict:
+    """Select a competition to work with."""
     competition = args["competition"]
-
-    # Create competition directory structure
-    comp_dir = get_competition_dir(competition)
-    data_dir = get_competition_data_dir(competition)
-    models_dir = get_competition_models_dir(competition)
-    scripts_dir = get_competition_scripts_dir(competition)
-    submissions_dir = get_competition_submissions_dir(competition)
-
-    for d in [data_dir, models_dir, scripts_dir, submissions_dir]:
-        d.mkdir(parents=True, exist_ok=True)
-
-    # Download competition data to the data subdirectory
-    data_path = await state.kaggle_client.download_competition_data(
-        competition,
-        path=data_dir,
-    )
-
-    # List files
-    files = await state.kaggle_client.list_competition_files(competition)
-
-    # Create experiment (store DB in competition folder)
-    exp_db_path = comp_dir / "experiments.db"
-    state.experiment_manager = ExperimentManager(exp_db_path)
-
-    experiment = await state.experiment_manager.create_experiment(
-        competition=competition,
-        description=args.get("description", f"Experiment for {competition}"),
-        data_version="v1",
-    )
-
-    # Update trainer to save models in competition's models folder
-    state.trainer = MLTrainer(
-        TrainingConfig(artifact_dir=models_dir),
-        timeout_callback=lambda: state.cost_controller.check_job_timeout("current")[0],
-    )
-
     state.current_competition = competition
-    state.current_experiment_id = experiment.experiment_id
 
     return {
         "status": "success",
         "competition": competition,
-        "experiment_id": experiment.experiment_id,
-        "data_path": str(data_path),
-        "models_path": str(models_dir),
-        "scripts_path": str(scripts_dir),
-        "submissions_path": str(submissions_dir),
-        "files": files,
-    }
-
-
-async def handle_analyze_data(args: dict) -> dict:
-    """Analyze competition data."""
-    if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
-
-    import pandas as pd
-
-    file_name = args.get("file_name", "train.csv")
-    data_dir = get_competition_data_dir(state.current_competition)
-    file_path = data_dir / file_name
-
-    if not file_path.exists():
-        # Try looking in zip extracted folder or parent
-        for p in get_competition_dir(state.current_competition).rglob(file_name):
-            file_path = p
-            break
-
-    if not file_path.exists():
-        return {"error": f"File not found: {file_name}"}
-
-    df = pd.read_csv(file_path)
-
-    engineer = FeatureEngineer()
-    analysis = engineer.analyze_dataframe(df)
-
-    return {
-        "file": file_name,
-        "analysis": analysis,
-    }
-
-
-async def handle_train_model(args: dict) -> dict:
-    """Train a model."""
-    if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
-
-    # Check cost controller
-    can_train, msg = state.cost_controller.can_start_training()
-    if not can_train:
-        return {"error": f"Training not allowed: {msg}"}
-
-    import pandas as pd
-
-    # Load training data
-    data_dir = get_competition_data_dir(state.current_competition)
-    train_path = data_dir / "train.csv"
-    if not train_path.exists():
-        for p in get_competition_dir(state.current_competition).rglob("train.csv"):
-            train_path = p
-            break
-
-    df = pd.read_csv(train_path)
-
-    model_type = ModelType(args["model_type"])
-    target_column = args["target_column"]
-    id_column = args.get("id_column")
-
-    # Drop ID column if specified (it shouldn't be used as a feature)
-    if id_column and id_column in df.columns:
-        df = df.drop(columns=[id_column])
-
-    # Create experiment run
-    run = await state.experiment_manager.create_run(
-        experiment_id=state.current_experiment_id,
-        model_type=model_type.value,
-        hyperparameters=args.get("hyperparameters", {}),
-        features_used=args.get("feature_columns", df.columns.tolist()),
-    )
-
-    # Start cost tracking
-    job_id = run.run_id
-    state.cost_controller.start_job(
-        job_id,
-        model_type=model_type.value,
-        competition=state.current_competition,
-    )
-
-    try:
-        # Train model
-        result = await state.trainer.train(
-            train_df=df,
-            target_column=target_column,
-            model_type=model_type,
-            hyperparameters=args.get("hyperparameters"),
-            feature_columns=args.get("feature_columns"),
-        )
-
-        # Update experiment run
-        await state.experiment_manager.update_run(
-            run_id=run.run_id,
-            cv_score=result.cv_score,
-            cv_std=result.cv_std,
-            training_time_seconds=result.training_time_seconds,
-            status="completed",
-            artifact_path=result.artifact_path,
-        )
-
-        state.cost_controller.end_job(job_id, status="completed")
-
-        return {
-            "status": "success",
-            "run_id": result.run_id,
-            "model_type": result.model_type,
-            "cv_score": result.cv_score,
-            "cv_std": result.cv_std,
-            "cv_scores": result.cv_scores,
-            "training_time_seconds": result.training_time_seconds,
-            "feature_importance": dict(
-                sorted(
-                    (result.feature_importance or {}).items(),
-                    key=lambda x: x[1],
-                    reverse=True,
-                )[:10]
-            ),
-            "artifact_path": result.artifact_path,
-        }
-
-    except Exception as e:
-        state.cost_controller.end_job(job_id, status="failed")
-        await state.experiment_manager.update_run(
-            run_id=run.run_id,
-            status="failed",
-            notes=str(e),
-        )
-        return {"error": f"Training failed: {e}"}
-
-
-async def handle_tune_hyperparameters(args: dict) -> dict:
-    """Tune hyperparameters."""
-    if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
-
-    import pandas as pd
-
-    data_dir = get_competition_data_dir(state.current_competition)
-    train_path = data_dir / "train.csv"
-    if not train_path.exists():
-        for p in get_competition_dir(state.current_competition).rglob("train.csv"):
-            train_path = p
-            break
-
-    df = pd.read_csv(train_path)
-
-    model_type = ModelType(args["model_type"])
-    target_column = args["target_column"]
-
-    result = await state.trainer.tune_hyperparameters(
-        train_df=df,
-        target_column=target_column,
-        model_type=model_type,
-        n_trials=args.get("n_trials", 50),
-        timeout=args.get("timeout"),
-    )
-
-    return {
-        "status": "success",
-        "model_type": model_type.value,
-        "best_params": result["best_params"],
-        "best_score": result["best_score"],
-        "n_trials": result["n_trials"],
-    }
-
-
-async def handle_generate_predictions(args: dict) -> dict:
-    """Generate predictions."""
-    if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
-
-    import pandas as pd
-    import numpy as np
-
-    run_id = args["run_id"]
-    test_file = args.get("test_file", "test.csv")
-    id_column = args["id_column"]
-    prediction_column = args["prediction_column"]
-
-    # Find test file
-    data_dir = get_competition_data_dir(state.current_competition)
-    test_path = data_dir / test_file
-    if not test_path.exists():
-        for p in get_competition_dir(state.current_competition).rglob(test_file):
-            test_path = p
-            break
-
-    if not test_path.exists():
-        return {"error": f"Test file not found: {test_file}"}
-
-    # Find model artifact
-    models_dir = get_competition_models_dir(state.current_competition)
-    run = await state.experiment_manager.get_run(run_id)
-    if not run or not run.artifact_path:
-        # Try to find by run_id prefix in competition's models folder
-        for p in models_dir.glob(f"{run_id}*.pkl"):
-            artifact_path = str(p)
-            break
-        else:
-            return {"error": f"Model artifact not found for run: {run_id}"}
-    else:
-        artifact_path = run.artifact_path
-
-    test_df = pd.read_csv(test_path)
-    ids = test_df[id_column].values
-
-    # Generate predictions
-    predictions = await state.trainer.predict(
-        test_df=test_df.drop(columns=[id_column], errors='ignore'),
-        artifact_path=artifact_path,
-    )
-
-    # Create submission file
-    submissions_dir = get_competition_submissions_dir(state.current_competition)
-    submission_df = pd.DataFrame({
-        id_column: ids,
-        prediction_column: predictions,
-    })
-
-    submission_path = submissions_dir / f"submission_{run_id}.csv"
-    submission_df.to_csv(submission_path, index=False)
-
-    # Read back the CSV content so it can be used by the client
-    csv_content = submission_df.to_csv(index=False)
-
-    return {
-        "status": "success",
-        "run_id": run_id,
-        "filename": f"submission_{run_id}.csv",
-        "content": csv_content,
-        "rows": len(submission_df),
-        "prediction_stats": {
-            "mean": float(np.mean(predictions)),
-            "std": float(np.std(predictions)),
-            "min": float(np.min(predictions)),
-            "max": float(np.max(predictions)),
-        },
-    }
-
-
-async def handle_submit(args: dict) -> dict:
-    """Submit to Kaggle."""
-    if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
-
-    submission_file = Path(args["submission_file"])
-    message = args["message"]
-    cv_score = args.get("cv_score")
-
-    # Check guardrails
-    can_submit, reason = await state.submission_guard.check_can_submit(
-        state.current_competition,
-        cv_score=cv_score,
-    )
-
-    if not can_submit:
-        return {
-            "status": "blocked",
-            "reason": reason,
-            "submission_summary": state.submission_guard.get_submission_summary(state.current_competition),
-        }
-
-    # Request approval
-    approved, approval_msg = await state.submission_guard.request_approval(
-        state.current_competition,
-        str(submission_file),
-        cv_score,
-    )
-
-    if not approved:
-        return {
-            "status": "not_approved",
-            "reason": approval_msg,
-        }
-
-    # Submit
-    submission = await state.kaggle_client.submit(
-        competition=state.current_competition,
-        file_path=submission_file,
-        message=message,
-    )
-
-    # Record submission
-    await state.submission_guard.record_submission(
-        competition=state.current_competition,
-        file_path=str(submission_file),
-        cv_score=cv_score,
-        approved=True,
-        submitted=True,
-        message=message,
-    )
-
-    return {
-        "status": "success",
-        "submission_id": submission.id,
-        "message": message,
-        "submission_summary": state.submission_guard.get_submission_summary(state.current_competition),
+        "message": f"Selected competition: {competition}. Notebooks will have access to data at /kaggle/input/{competition}/",
     }
 
 
 async def handle_get_leaderboard(args: dict) -> dict:
     """Get leaderboard."""
     if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
+        return {"error": "No competition selected. Call select_competition first."}
 
     leaderboard = await state.kaggle_client.get_leaderboard(
         state.current_competition,
@@ -841,7 +363,7 @@ async def handle_get_leaderboard(args: dict) -> dict:
 async def handle_get_submissions(args: dict) -> dict:
     """Get submission history."""
     if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
+        return {"error": "No competition selected. Call select_competition first."}
 
     submissions = await state.kaggle_client.list_submissions(
         state.current_competition,
@@ -863,76 +385,19 @@ async def handle_get_submissions(args: dict) -> dict:
     }
 
 
-async def handle_get_experiment_summary(args: dict) -> dict:
-    """Get experiment summary."""
-    if not state.current_experiment_id:
-        return {"error": "No experiment set up. Call setup_competition first."}
-
-    summary = await state.experiment_manager.get_experiment_summary(
-        state.current_experiment_id
-    )
-
-    runs = await state.experiment_manager.get_runs_for_experiment(
-        state.current_experiment_id,
-        limit=10,
-    )
-
-    return {
-        "summary": summary,
-        "recent_runs": [
-            {
-                "run_id": r.run_id,
-                "model_type": r.model_type,
-                "cv_score": r.cv_score,
-                "cv_std": r.cv_std,
-                "status": r.status,
-                "created_at": r.created_at.isoformat(),
-            }
-            for r in runs
-        ],
-    }
-
-
-async def handle_get_status(args: dict) -> dict:
-    """Get current status."""
-    status = {
-        "current_competition": state.current_competition,
-        "current_experiment_id": state.current_experiment_id,
-        "cost_status": state.cost_controller.get_status(),
-    }
-
-    if state.current_competition:
-        status["submission_status"] = state.submission_guard.get_submission_summary(
-            state.current_competition
-        )
-
-    return status
-
-
 async def handle_configure_guardrails(args: dict) -> dict:
     """Configure guardrails."""
     if "max_submissions_per_day" in args:
         state.submission_guard.config.max_submissions_per_day = args["max_submissions_per_day"]
 
-    if "require_approval" in args:
-        state.submission_guard.config.require_approval = args["require_approval"]
-
     if "dry_run_mode" in args:
         state.submission_guard.config.dry_run_mode = args["dry_run_mode"]
-
-    if "max_training_time_seconds" in args:
-        state.cost_controller.config.max_training_time_seconds = args["max_training_time_seconds"]
 
     return {
         "status": "success",
         "submission_config": {
             "max_submissions_per_day": state.submission_guard.config.max_submissions_per_day,
-            "require_approval": state.submission_guard.config.require_approval,
             "dry_run_mode": state.submission_guard.config.dry_run_mode,
-        },
-        "cost_config": {
-            "max_training_time_seconds": state.cost_controller.config.max_training_time_seconds,
-            "max_total_training_time_per_day": state.cost_controller.config.max_total_training_time_per_day,
         },
     }
 
@@ -940,13 +405,21 @@ async def handle_configure_guardrails(args: dict) -> dict:
 async def handle_create_kaggle_notebook(args: dict) -> dict:
     """Create a Kaggle notebook directly in the user's account."""
     if not state.current_competition:
-        return {"error": "No competition set up. Call setup_competition first."}
+        return {"error": "No competition selected. Call select_competition first."}
 
     title = args["title"]
     code = args["code"]
     is_private = args.get("is_private", False)
     enable_gpu = args.get("enable_gpu", False)
     enable_internet = args.get("enable_internet", True)
+    auto_run = args.get("auto_run", False)
+    auto_submit = args.get("auto_submit", False)
+    submission_message = args.get("submission_message", "")
+
+    if auto_submit and not auto_run:
+        return {"error": "auto_submit requires auto_run=True"}
+    if auto_submit and not submission_message:
+        return {"error": "submission_message is required when auto_submit=True"}
 
     # Get username from kaggle.json or environment
     username = os.environ.get("KAGGLE_USERNAME")
@@ -1074,18 +547,219 @@ async def handle_create_kaggle_notebook(args: dict) -> dict:
         with open(local_path, 'w') as f:
             f.write(notebook_json)
 
-        return {
+        notebook_slug = f"{username}/{slug}"
+        result = {
             "status": "success",
             "title": title,
-            "slug": f"{username}/{slug}",
+            "slug": notebook_slug,
             "url": response.url if hasattr(response, 'url') and response.url else f"https://www.kaggle.com/code/{username}/{slug}",
             "version": response.version_number if hasattr(response, 'version_number') else 1,
             "local_path": str(local_path),
             "error": response.error if hasattr(response, 'error') and response.error else None,
         }
 
+        # Auto-run if requested
+        if auto_run:
+            run_result = await handle_run_kaggle_notebook({
+                "notebook_slug": notebook_slug,
+                "timeout_minutes": 60,
+            })
+            result["run_result"] = run_result
+
+            # Auto-submit if requested and run succeeded
+            if auto_submit and run_result.get("status") == "complete":
+                submit_result = await handle_submit_notebook_output({
+                    "notebook_slug": notebook_slug,
+                    "output_file": "submission.csv",
+                    "message": submission_message,
+                })
+                result["submit_result"] = submit_result
+            elif auto_submit and run_result.get("status") != "complete":
+                result["submit_result"] = {
+                    "error": f"Cannot auto-submit: notebook execution failed with status '{run_result.get('status')}'"
+                }
+
+        return result
+
     except Exception as e:
         return {"error": f"Failed to create notebook: {str(e)}"}
+
+
+def _get_kaggle_sdk_client():
+    """Helper to create authenticated Kaggle SDK client."""
+    from kagglesdk import KaggleClient as SdkClient
+    kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+    with open(kaggle_json) as f:
+        creds = json.load(f)
+    api_key = creds.get("key")
+    kaggle_username = creds.get("username")
+
+    if api_key and api_key.startswith("KGAT_"):
+        return SdkClient(api_token=api_key)
+    else:
+        return SdkClient(username=kaggle_username, password=api_key)
+
+
+async def handle_run_kaggle_notebook(args: dict) -> dict:
+    """Run a Kaggle notebook and wait for completion."""
+    import time
+
+    notebook_slug = args["notebook_slug"]
+    timeout_minutes = args.get("timeout_minutes", 60)
+
+    try:
+        from kagglesdk.kernels.types.kernels_api_service import ApiCreateKernelSessionRequest
+
+        def _run_notebook():
+            with _get_kaggle_sdk_client() as client:
+                # Start the kernel session (run the notebook)
+                request = ApiCreateKernelSessionRequest()
+                request.slug = notebook_slug
+
+                response = client.kernels.kernels_api_client.create_kernel_session(request)
+                return response
+
+        loop = asyncio.get_event_loop()
+        run_response = await loop.run_in_executor(None, _run_notebook)
+
+        # Poll for completion
+        start_time = time.time()
+        timeout_seconds = timeout_minutes * 60
+        poll_interval = 30  # Check every 30 seconds
+
+        def _check_status():
+            with _get_kaggle_sdk_client() as client:
+                return client.kernels.kernels_api_client.get_kernel_session_status(notebook_slug)
+
+        final_status = None
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout_seconds:
+                return {
+                    "status": "timeout",
+                    "message": f"Notebook execution timed out after {timeout_minutes} minutes",
+                    "notebook_slug": notebook_slug,
+                }
+
+            status_response = await loop.run_in_executor(None, _check_status)
+            status = status_response.status if hasattr(status_response, 'status') else str(status_response)
+
+            # Check if completed (status values: queued, running, complete, error, cancelAcknowledged)
+            if status in ["complete", "error", "cancelAcknowledged"]:
+                final_status = status
+                break
+
+            await asyncio.sleep(poll_interval)
+
+        # Get output files
+        def _get_outputs():
+            with _get_kaggle_sdk_client() as client:
+                return client.kernels.kernels_api_client.list_kernel_session_output(notebook_slug)
+
+        outputs_response = await loop.run_in_executor(None, _get_outputs)
+        output_files = []
+        if hasattr(outputs_response, 'files'):
+            output_files = [f.name if hasattr(f, 'name') else str(f) for f in outputs_response.files]
+
+        return {
+            "status": final_status,
+            "notebook_slug": notebook_slug,
+            "output_files": output_files,
+            "execution_time_seconds": int(time.time() - start_time),
+            "message": "Notebook execution completed" if final_status == "complete" else f"Notebook ended with status: {final_status}",
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to run notebook: {str(e)}"}
+
+
+async def handle_submit_notebook_output(args: dict) -> dict:
+    """Submit a notebook's output file to the competition."""
+    if not state.current_competition:
+        return {"error": "No competition set up. Call setup_competition first."}
+
+    notebook_slug = args["notebook_slug"]
+    output_file = args.get("output_file", "submission.csv")
+    message = args["message"]
+
+    try:
+        # Download the output file from the notebook
+        def _download_output():
+            with _get_kaggle_sdk_client() as client:
+                return client.kernels.kernels_api_client.download_kernel_output(
+                    notebook_slug,
+                    output_file
+                )
+
+        loop = asyncio.get_event_loop()
+        output_content = await loop.run_in_executor(None, _download_output)
+
+        # Save to local submissions directory
+        submissions_dir = get_competition_submissions_dir(state.current_competition)
+        local_file = submissions_dir / f"notebook_{output_file}"
+
+        # Handle different response types
+        if hasattr(output_content, 'content'):
+            content = output_content.content
+        elif isinstance(output_content, bytes):
+            content = output_content
+        else:
+            content = str(output_content).encode()
+
+        with open(local_file, 'wb') as f:
+            f.write(content if isinstance(content, bytes) else content.encode())
+
+        # Submit directly using the Kaggle client
+        full_message = f"[Notebook: {notebook_slug}] {message}"
+
+        # Check guardrails
+        can_submit, reason = await state.submission_guard.check_can_submit(
+            state.current_competition,
+            cv_score=None,
+        )
+
+        if not can_submit:
+            return {
+                "status": "blocked",
+                "reason": reason,
+                "notebook_slug": notebook_slug,
+                "downloaded_from": output_file,
+            }
+
+        # Submit
+        submission = await state.kaggle_client.submit(
+            competition=state.current_competition,
+            file_path=local_file,
+            message=full_message,
+        )
+
+        # Record submission
+        await state.submission_guard.record_submission(
+            competition=state.current_competition,
+            file_path=str(local_file),
+            cv_score=None,
+            approved=True,
+            submitted=True,
+            message=full_message,
+        )
+
+        return {
+            "status": "success",
+            "submission_id": submission.id,
+            "message": full_message,
+            "notebook_slug": notebook_slug,
+            "downloaded_from": output_file,
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to submit notebook output: {str(e)}"}
+
+
+def get_competition_submissions_dir(competition: str) -> Path:
+    """Get the submissions directory for a competition."""
+    submissions_dir = state.data_dir / competition / "submissions"
+    submissions_dir.mkdir(parents=True, exist_ok=True)
+    return submissions_dir
 
 
 async def run_server():
